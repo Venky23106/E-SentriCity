@@ -1,0 +1,431 @@
+import socket
+import json
+import struct
+import time
+
+from pyrf24 import (
+    RF24,
+    RF24_PA_LOW,
+    RF24_250KBPS,
+    RF24_CRC_16,
+)
+
+
+# ==========================================================
+# WIFI SERVER
+# ==========================================================
+
+HOST = "0.0.0.0"
+PORT = 5000
+
+
+# ==========================================================
+# nRF24 CONFIG
+# Kept active so your nRF hardware remains part of project
+# ==========================================================
+
+CE_PIN = 25
+CSN_PIN = 0
+
+NRF_CHANNEL = 76
+NRF_ADDRESS = b"PI001"
+
+PACKET_FORMAT = "<8sBBHII"
+PACKET_SIZE = struct.calcsize(PACKET_FORMAT)
+
+
+# ==========================================================
+# nRF24 SETUP
+# ==========================================================
+
+radio = RF24(
+    CE_PIN,
+    CSN_PIN
+)
+
+nrf_ready = False
+
+
+def setup_nrf():
+
+    global nrf_ready
+
+    print("Starting nRF24L01...")
+
+    try:
+
+        if not radio.begin():
+
+            print(
+                "nRF24 not detected."
+            )
+
+            return
+
+        radio.channel = NRF_CHANNEL
+
+        radio.data_rate = RF24_250KBPS
+
+        radio.set_pa_level(
+            RF24_PA_LOW
+        )
+
+        radio.crc_length = RF24_CRC_16
+
+        # Keep ACK enabled
+        radio.set_auto_ack(
+            True
+        )
+
+        # Raspberry Pi ACK timing
+        radio.tx_delay = 100
+
+        radio.payload_size = (
+            PACKET_SIZE
+        )
+
+        radio.open_rx_pipe(
+            1,
+            NRF_ADDRESS
+        )
+
+        radio.listen = True
+
+        nrf_ready = True
+
+        print(
+            "nRF24 receiver ready."
+        )
+
+    except Exception as e:
+
+        print(
+            "nRF24 setup error:",
+            e
+        )
+
+        print(
+            "Continuing with Wi-Fi..."
+        )
+
+
+# ==========================================================
+# DECODE nRF PACKET
+# ==========================================================
+
+def process_nrf():
+
+    if not nrf_ready:
+        return
+
+    try:
+
+        if radio.available():
+
+            data = radio.read(
+                PACKET_SIZE
+            )
+
+            if len(data) != PACKET_SIZE:
+                return
+
+            (
+                node_id,
+                pir,
+                sound_detected,
+                mic_level,
+                sequence,
+                uptime
+            ) = struct.unpack(
+                PACKET_FORMAT,
+                data
+            )
+
+            node_id = (
+                node_id
+                .split(
+                    b"\0",
+                    1
+                )[0]
+                .decode(
+                    "ascii",
+                    errors="replace"
+                )
+            )
+
+            print()
+            print(
+                "[nRF] Packet received"
+            )
+
+            print(
+                "Node:",
+                node_id
+            )
+
+            print(
+                "PIR:",
+                pir
+            )
+
+            print(
+                "Sound:",
+                sound_detected
+            )
+
+            print(
+                "Mic:",
+                mic_level
+            )
+
+            print(
+                "Sequence:",
+                sequence
+            )
+
+    except Exception as e:
+
+        print(
+            "nRF receive error:",
+            e
+        )
+
+
+# ==========================================================
+# WIFI SERVER
+# ==========================================================
+
+server = socket.socket(
+    socket.AF_INET,
+    socket.SOCK_STREAM
+)
+
+server.setsockopt(
+    socket.SOL_SOCKET,
+    socket.SO_REUSEADDR,
+    1
+)
+
+server.bind(
+    (HOST, PORT)
+)
+
+server.listen(
+    1
+)
+
+server.settimeout(
+    0.2
+)
+
+
+print()
+print(
+    "======================================"
+)
+
+print(
+    "   SENTRIPOLE RASPBERRY PI"
+)
+
+print(
+    "======================================"
+)
+
+print(
+    f"Wi-Fi TCP port: {PORT}"
+)
+
+print(
+    "Waiting for ESP32..."
+)
+
+print()
+
+
+setup_nrf()
+
+
+# ==========================================================
+# WIFI LOOP
+# ==========================================================
+
+client = None
+
+while True:
+
+    # ------------------------------------------------------
+    # Check nRF without blocking Wi-Fi
+    # ------------------------------------------------------
+
+    process_nrf()
+
+
+    # ------------------------------------------------------
+    # Accept ESP32
+    # ------------------------------------------------------
+
+    if client is None:
+
+        try:
+
+            client, address = (
+                server.accept()
+            )
+
+            client.settimeout(
+                0.05
+            )
+
+            print()
+            print(
+                "ESP32 connected:",
+                address
+            )
+
+        except socket.timeout:
+
+            continue
+
+        except Exception as e:
+
+            print(
+                "Server error:",
+                e
+            )
+
+            continue
+
+
+    # ------------------------------------------------------
+    # Receive Wi-Fi data
+    # ------------------------------------------------------
+
+    try:
+
+        data = client.recv(
+            1024
+        )
+
+        if not data:
+
+            print(
+                "ESP32 disconnected."
+            )
+
+            client.close()
+
+            client = None
+
+            continue
+
+
+        text = data.decode(
+            "utf-8"
+        )
+
+        # ESP32 sends JSON line-by-line
+        for line in text.splitlines():
+
+            if not line.strip():
+                continue
+
+            try:
+
+                packet = json.loads(
+                    line
+                )
+
+                print()
+                print(
+                    "=============================="
+                )
+
+                print(
+                    "      WIFI SENSOR PACKET"
+                )
+
+                print(
+                    "=============================="
+                )
+
+                print(
+                    "Node       :",
+                    packet.get("nodeID")
+                )
+
+                print(
+                    "PIR        :",
+                    packet.get("pir")
+                )
+
+                print(
+                    "RMS        :",
+                    packet.get("rms")
+                )
+
+                print(
+                    "Mic Level  :",
+                    packet.get("micLevel")
+                )
+
+                print(
+                    "THREAT     :",
+                    packet.get("threat")
+                )
+
+                print(
+                    "Sequence   :",
+                    packet.get("sequence")
+                )
+
+                print(
+                    "Uptime     :",
+                    packet.get("uptime")
+                )
+
+                print(
+                    "nRF Status :",
+                    packet.get("nrfStatus")
+                )
+
+                # ----------------------------------------
+                # EVENT
+                # ----------------------------------------
+
+                if (
+                    packet.get("pir") == 1
+                    or
+                    packet.get("threat") == 1
+                ):
+
+                    print(
+                        ">>> THREAT EVENT <<<"
+                    )
+
+            except json.JSONDecodeError:
+
+                print(
+                    "Invalid JSON:",
+                    line
+                )
+
+
+    except socket.timeout:
+
+        continue
+
+
+    except Exception as e:
+
+        print(
+            "Wi-Fi connection error:",
+            e
+        )
+
+        try:
+            client.close()
+        except:
+            pass
+
+        client = None
